@@ -110,7 +110,7 @@ def _fetch_batch_with_retry(
     client: arxiv.Client,
     id_list: list[str],
     max_retries: int = 5,
-    base_delay: float = 15.0,
+    base_delay: float = 30.0,
 ) -> list[ArxivResult]:
     """Fetch a batch of arXiv papers with exponential backoff on HTTP 429."""
     for attempt in range(max_retries):
@@ -138,7 +138,8 @@ class ArxivRetriever(BaseRetriever):
             raise ValueError("category must be specified for arxiv.")
 
     def _retrieve_raw_papers(self) -> list[ArxivResult]:
-        client = arxiv.Client(num_retries=10, delay_seconds=10)
+        # Use minimal internal retries with longer delay to avoid 429 storm
+        client = arxiv.Client(num_retries=3, delay_seconds=30)
         query = '+'.join(self.config.source.arxiv.category)
         include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
         # Get the latest paper from arxiv rss feed
@@ -156,11 +157,13 @@ class ArxivRetriever(BaseRetriever):
             all_paper_ids = all_paper_ids[:10]
 
         # Get full information of each paper from arxiv api
+        # Use smaller batches (10) with longer pauses to respect rate limits
+        batch_size = 10
         bar = tqdm(total=len(all_paper_ids))
-        for i in range(0, len(all_paper_ids), 20):
+        for i in range(0, len(all_paper_ids), batch_size):
             if i > 0:
-                time.sleep(5)  # rate-limit: pause between batches
-            batch = _fetch_batch_with_retry(client, all_paper_ids[i:i + 20])
+                time.sleep(10)  # rate-limit: pause between batches
+            batch = _fetch_batch_with_retry(client, all_paper_ids[i:i + batch_size])
             bar.update(len(batch))
             raw_papers.extend(batch)
         bar.close()
