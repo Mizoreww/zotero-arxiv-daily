@@ -8,6 +8,7 @@ import feedparser
 from tqdm import tqdm
 import multiprocessing
 import os
+import time
 from queue import Empty
 from typing import Any, Callable, TypeVar
 from loguru import logger
@@ -105,6 +106,30 @@ def _extract_text_from_tar_worker(source_url: str, paper_id: str) -> str | None:
         return file_contents["all"]
 
 
+def _fetch_batch_with_retry(
+    client: arxiv.Client,
+    id_list: list[str],
+    max_retries: int = 5,
+    base_delay: float = 15.0,
+) -> list[ArxivResult]:
+    """Fetch a batch of arXiv papers with exponential backoff on HTTP 429."""
+    for attempt in range(max_retries):
+        try:
+            search = arxiv.Search(id_list=id_list)
+            return list(client.results(search))
+        except arxiv.HTTPError as e:
+            if "429" in str(e) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    f"arXiv API rate limited (429), retrying in {delay:.0f}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(delay)
+            else:
+                raise
+    return []
+
+
 @register_retriever("arxiv")
 class ArxivRetriever(BaseRetriever):
     def __init__(self, config):
@@ -133,8 +158,9 @@ class ArxivRetriever(BaseRetriever):
         # Get full information of each paper from arxiv api
         bar = tqdm(total=len(all_paper_ids))
         for i in range(0, len(all_paper_ids), 20):
-            search = arxiv.Search(id_list=all_paper_ids[i:i + 20])
-            batch = list(client.results(search))
+            if i > 0:
+                time.sleep(5)  # rate-limit: pause between batches
+            batch = _fetch_batch_with_retry(client, all_paper_ids[i:i + 20])
             bar.update(len(batch))
             raw_papers.extend(batch)
         bar.close()
